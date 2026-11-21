@@ -18,6 +18,10 @@ KITE = False  # tried it, practice score dropped 3.85 -> 3.38
 DANGER = True
 # rough dps and range per weapon, only used to compare fights
 WDPS = {"gun": (187, 200), "laser": (210, 280), "lightning": (150, 45), "mortar": (60, 220)}
+ISO_RADIUS = 80     # friends of a target this close to it count against it
+ISO_PENALTY = 0.4   # per friend that can also hit us
+ESC_MARGIN = 1.5    # extra seconds on top of the walk to cover
+CRIT_HP = 0.25      # don't let a fight take us below this
 
 WEAPON_RANK = {"laser": 3, "lightning": 2, "mortar": 1, "gun": 0}
 UPGRADE_SCORE = {
@@ -269,6 +273,7 @@ class Bot:
         self.roam = None
         self.attacker = None
         self.dmg_log = deque()
+        self.cover_len = None
 
     def zone_at(self, z, t):
         s, e = z["shrink_start"], z["shrink_end"]
@@ -379,9 +384,40 @@ class Bot:
         s = 1 + 0.05 * (m.get("cubes") or 0)
         return (m["pos"][0], m["pos"][1], m["pos"][2] + 4.5 * s)
 
-    def dps(self, kinds, d, cubes):
-        tot = sum(WDPS[k][0] for k in kinds if k in WDPS and d < WDPS[k][1])
+    def dps(self, kinds, d, cubes, los=True):
+        tot = 0.0
+        for k in kinds:
+            if k not in WDPS or d >= WDPS[k][1]:
+                continue
+            if k == "gun":
+                acc = max(0.25, min(0.9, 1.0 - d / 250))
+            elif k == "laser":
+                acc = 0.7
+            elif k == "mortar":
+                acc = 0.3 if los else 0.15  # can lob over walls
+            else:
+                acc = 1.0
+            if los or k == "mortar":
+                tot += WDPS[k][0] * acc
         return tot * (1 + 0.04 * (cubes or 0))
+
+    def threat_dps(self, m, x, y):
+        # how much of its dps is actually headed our way
+        a = abs(wrap(m["aim"][0] - math.atan2(y - m["pos"][1], x - m["pos"][0])))
+        facing = 1.0 if a < 0.35 else (0.5 if a < 1.0 else 0.2)
+        return self.dps(m.get("weapons") or [], m["_d"], m.get("cubes"), m["_los"]) * facing
+
+    def path_len(self, me, gx, gy):
+        x, y = me["pos"][0], me["pos"][1]
+        pts = self.map.path(x, y, gx, gy, budget=0.004) if self.map else None
+        if not pts:
+            return math.hypot(gx - x, gy - y) * 1.5
+        n, px, py = 0.0, x, y
+        for qx, qy in pts:
+            n += math.hypot(qx - px, qy - py)
+            px, py = qx, qy
+        # path gave up early: guess the rest
+        return n + math.hypot(gx - px, gy - py) * 1.3
 
     def act(self, obs):
         me = obs["self"]
@@ -437,7 +473,8 @@ class Bot:
             m["_los"] = self.los(muz, self.center(m))
         threats = [m for m in mechs if m["_d"] < 220]
         # enemies that can hit us right now
-        shooters = [m for m in threats if m["_los"] and self.dps(m.get("weapons") or [], m["_d"], m.get("cubes")) > 0]
+        uniq = {m["id"]: m for m in threats}
+        shooters = [m for m in uniq.values() if self.dps(m.get("weapons") or [], m["_d"], m.get("cubes"), m["_los"]) > 0]
         enemy = None
         if mechs:
             atk = self.attacker[0] if self.attacker and t - self.attacker[1] < 3 else None
@@ -446,7 +483,7 @@ class Bot:
                 s = m["_d"] * (0.6 if m["_los"] else 1.0) * (0.7 + 0.6 * m["hp"] / max(1, m["max_hp"]))
                 if DANGER:
                     # fighting next to its friends means they shoot us too
-                    s *= 1 + 0.4 * sum(1 for o in shooters if o is not m and math.dist(o["pos"], m["pos"]) < 80)
+                    s *= 1 + ISO_PENALTY * sum(1 for o in shooters if o["id"] != m["id"] and math.dist(o["pos"], m["pos"]) < ISO_RADIUS)
                 return s * 0.6 if m["id"] == atk else s  # shoot whoever is shooting us
 
             enemy = min(mechs, key=score)
@@ -484,22 +521,34 @@ class Bot:
             while self.dmg_log and t - self.dmg_log[0][0] > 2.0:
                 self.dmg_log.popleft()
             incoming = sum(a for _, a in self.dmg_log) / 2.0
-            danger = sum(self.dps(m.get("weapons") or [], m["_d"], m.get("cubes")) for m in shooters)
-            # about half their shots land; trust what actually hit us if it's worse
-            ttd = me["hp"] / max(incoming, danger * 0.5, 1.0)
+            predicted = sum(self.threat_dps(m, x, y) for m in shooters)
+            # damage already on the way: lasers charging at us, bullets about to land
+            burst = 0.0
+            for m in shooters:
+                if m.get("charging") and abs(wrap(m["aim"][0] - math.atan2(y - m["pos"][1], x - m["pos"][0]))) < 0.15:
+                    burst += 315 * 0.7 * (1 + 0.04 * (m.get("cubes") or 0))
+            for pr in obs.get("projectiles", []):
+                if pr["kind"] == "gun" and math.dist(pr["pos"], me["pos"]) < 40:
+                    burst += 45 * 0.5
+            # measured and predicted are the same enemies, so take the larger, don't add
+            rate = max(incoming, predicted, 1.0)
+            hp_left = me["hp"] - burst
+            ttd = hp_left / rate
             ttk = 1e9
             if enemy is not None and enemy["_los"]:
                 ttk = enemy["hp"] / max(1.0, self.dps(list(kinds), enemy["_d"], me.get("cubes")))
-            if ttd < 12:
+            # we win the race to the kill with hp to spare: keep fighting
+            winning = hp_left - rate * ttk > CRIT_HP * me["max_hp"]
+            if not winning and ttd < 15:
                 if self.cover is None or t - self.cover_t > 1.0:
                     self.cover = self.find_cover(me, threats, in_safe)
                     self.cover_t = t
-                if self.cover:
-                    escape = math.hypot(self.cover[0] - x, self.cover[1] - y) / (speed * 1.3) + 0.5
+                    self.cover_len = self.path_len(me, *self.cover) if self.cover else None
+                if self.cover and self.cover_len is not None:
+                    escape = self.cover_len / speed + 0.5  # +0.5 for bumping into stuff
                 else:
                     escape = 4.0
-                # leave while we can still make it, unless the target dies first
-                if ttd < escape + 2.0 and ttk > ttd * 0.8:
+                if ttd < escape + ESC_MARGIN:
                     self.recover = True
 
         aim = None
