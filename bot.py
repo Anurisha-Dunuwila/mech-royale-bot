@@ -23,7 +23,7 @@ PREDICT = False       # also hide from where enemies will be in 2 s
 DYN_STRAFE = True     # less predictable strafing
 SURROUND = False      # move toward the gap when enemies are on several sides (like KITE)
 HIGH_GROUND = False   # prefer higher ground when picking a zone spot
-BOTTLENECK = True     # don't park in narrow spots
+BOTTLENECK = False    # don't park in narrow spots
 ZONE_SPOT = False     # wait in the next zone next to some walls, not in the open
 EARLY_ROTATE = False  # leave for the next zone sooner
 # rough dps and range per weapon
@@ -744,7 +744,7 @@ class Bot:
             boost = urgent and me["energy"] > 20
             label = "ZONE " + label
 
-        if self.recover and threats and not urgent:
+        if self.recover and threats and not (urgent or must_go):
             if self.cover is None or t - self.cover_t > 0.6:
                 self.cover = self.find_cover(me, threats, in_safe)
                 self.cover_t = t
