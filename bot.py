@@ -30,7 +30,9 @@ HIDE_MODE = False     # no enemy in sight: go next to a building and wait there
 HP_BANDS = True       # >70% fight, 40-70% back off only vs stronger or outnumbered, <40% escape (3.96)
 ZONE_FIRST = False    # when hurt and the zone is closing, go to the zone instead of cover
 BOOST_BANDS = False   # <60% back off with boost while shooting, <40% boost out, no boost when alone
-ATTACK_UPGRADES = True  # take damage and fire rate upgrades before armor and regen
+ATTACK_UPGRADES = False  # take damage and fire rate upgrades before armor and regen (3.83)
+# farm crates and drones for cubes: each cube is +4% hp and damage, upgrades at 1/3/6/10/15/21
+FARM = True
 # rough dps and range per weapon
 WDPS = {"gun": (187, 200), "laser": (210, 280), "lightning": (150, 45), "mortar": (60, 220)}
 
@@ -687,14 +689,16 @@ class Bot:
         target = enemy
         tgt_is_mech = enemy is not None
         # don't poke npcs or crates when hurt, it resets regen
-        if target is None and hpf > 0.75:
-            cands = [n for n in npcs if math.dist(n["pos"], me["pos"]) < 100 and in_safe(n["pos"][0], n["pos"][1])]
+        npc_hp, npc_r = (0.5, 160) if FARM else (0.75, 100)
+        if target is None and hpf > npc_hp:
+            cands = [n for n in npcs if math.dist(n["pos"], me["pos"]) < npc_r and in_safe(n["pos"][0], n["pos"][1])]
             if cands:
                 target = min(cands, key=lambda n: math.dist(n["pos"], me["pos"]))
                 target["_d"] = math.dist(target["pos"], me["pos"])
                 target["_los"] = self.los(muz, self.center(target))
-        if target is None and hpf > 0.9:
-            cs = [c for c in obs.get("crates", []) if math.dist(c["pos"], me["pos"]) < 90 and in_safe(c["pos"][0], c["pos"][1])]
+        crate_hp, crate_r = (0.5, 150) if FARM else (0.9, 90)
+        if target is None and hpf > crate_hp:
+            cs = [c for c in obs.get("crates", []) if math.dist(c["pos"], me["pos"]) < crate_r and in_safe(c["pos"][0], c["pos"][1])]
             for c in sorted(cs, key=lambda c: math.dist(c["pos"], me["pos"])):
                 cpos = (c["pos"][0], c["pos"][1], c["pos"][2] + 1.2)
                 if not self.los(muz, cpos):
@@ -877,10 +881,14 @@ class Bot:
             label = label or "hide"
         elif not (urgent or must_go):
             goal = self.loot_goal(obs, me, in_safe, hpf)
+            if FARM and target is not None and not tgt_is_mech and target.get("kind") == "npc" and target["_d"] > 50:
+                # walk up to the drone, but stay outside its 45 m aggro range
+                if goal is None or target["_d"] * 0.8 < math.hypot(goal[0] - x, goal[1] - y):
+                    goal = (target["pos"][0], target["pos"][1], "drone")
             if goal is not None:
                 mx, my = self.nav_dir(me, t, goal[0], goal[1])
                 label = label or goal[2]
-            elif hpf > 0.7 and (w1 is None or t < 150):
+            elif hpf > (0.6 if FARM else 0.7) and (FARM or w1 is None or t < 150):
                 # nothing known nearby: look around for loot instead of standing still
                 if (self.roam is None or t > self.roam[2] or not in_safe(self.roam[0], self.roam[1])
                         or math.hypot(self.roam[0] - x, self.roam[1] - y) < 10):
@@ -984,11 +992,12 @@ class Bot:
             w = 0.5 if w1 is None else 0.8
             if d < 250 and in_safe(px, py) and abs(pz - z) < 20 and d * w < bs:
                 bs, best = d * w, (px, py, "weapon " + kind)
-        if hpf > 0.9:
+        if hpf > (0.5 if FARM else 0.9):
+            cw, cmax = (0.8, 300) if FARM else (1.2, 200)
             for cx, cy, cz, _ in self.known_crates.values():
                 d = math.hypot(cx - x, cy - y)
-                if d < 200 and in_safe(cx, cy) and abs(cz - z) < 15 and d * 1.2 < bs:
-                    bs, best = d * 1.2, (cx, cy, "crate")
+                if d < cmax and in_safe(cx, cy) and abs(cz - z) < 15 and d * cw < bs:
+                    bs, best = d * cw, (cx, cy, "crate")
         for dr in obs.get("drops", []):
             d = math.hypot(dr["pos"][0] - x, dr["pos"][1] - y)
             if dr.get("holder") not in (None, me["id"]) and dr.get("progress", 0) > 2.5:
