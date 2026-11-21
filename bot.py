@@ -27,7 +27,8 @@ BOTTLENECK = False    # don't park in narrow spots
 ZONE_SPOT = False     # wait in the next zone next to some walls, not in the open
 EARLY_ROTATE = False  # leave for the next zone sooner
 HIDE_MODE = False     # no enemy in sight: go next to a building and wait there
-HP_BANDS = True       # >70% fight, 40-70% back off only vs stronger or outnumbered, <40% escape
+HP_BANDS = True       # >70% fight, 40-70% back off only vs stronger or outnumbered, <40% escape (3.96)
+ZONE_FIRST = True     # when hurt and the zone is closing, go to the zone instead of cover
 # rough dps and range per weapon
 WDPS = {"gun": (187, 200), "laser": (210, 280), "lightning": (150, 45), "mortar": (60, 220)}
 
@@ -776,7 +777,7 @@ class Bot:
             boost = urgent and me["energy"] > 20
             label = "ZONE " + label
 
-        if self.recover and threats and not urgent:
+        if self.recover and threats and not (urgent or (ZONE_FIRST and must_go)):
             if self.cover is None or t - self.cover_t > 0.6:
                 self.cover = self.find_cover(me, threats, in_safe)
                 self.cover_t = t
