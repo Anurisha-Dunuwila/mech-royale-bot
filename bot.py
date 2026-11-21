@@ -26,7 +26,8 @@ HIGH_GROUND = False   # prefer higher ground when picking a zone spot
 BOTTLENECK = False    # don't park in narrow spots
 ZONE_SPOT = False     # wait in the next zone next to some walls, not in the open
 EARLY_ROTATE = False  # leave for the next zone sooner
-HIDE_MODE = True      # no enemy in sight: go next to a building and wait there
+HIDE_MODE = False     # no enemy in sight: go next to a building and wait there
+HP_BANDS = True       # >70% fight, 40-70% back off only vs stronger or outnumbered, <40% escape
 # rough dps and range per weapon
 WDPS = {"gun": (187, 200), "laser": (210, 280), "lightning": (150, 45), "mortar": (60, 220)}
 
@@ -622,7 +623,17 @@ class Bot:
         outnumbered = sum(1 for m in threats if m["_los"]) >= 2
         self.remember(obs, me)
 
-        if not self.recover and (hpf < 0.5 or (outnumbered and hpf < 0.7)):
+        if HP_BANDS:
+            stronger = False
+            if enemy is not None and enemy["_los"]:
+                mine = sum(1 for w in weapons if w)
+                stronger = (enemy["hp"] > me["hp"] * 1.2
+                            or (enemy.get("cubes") or 0) >= (me.get("cubes") or 0) + 3
+                            or len(enemy.get("weapons") or []) > mine)
+            start = hpf < 0.4 or (hpf < 0.7 and (outnumbered or stronger))
+        else:
+            start = hpf < 0.5 or (outnumbered and hpf < 0.7)
+        if not self.recover and start:
             self.recover = True
         elif self.recover and hpf > 0.9:
             self.recover = False
