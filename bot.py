@@ -26,6 +26,7 @@ HIGH_GROUND = False   # prefer higher ground when picking a zone spot
 BOTTLENECK = False    # don't park in narrow spots
 ZONE_SPOT = False     # wait in the next zone next to some walls, not in the open
 EARLY_ROTATE = False  # leave for the next zone sooner
+HIDE_MODE = True      # no enemy in sight: stand still, no looting or exploring
 # rough dps and range per weapon
 WDPS = {"gun": (187, 200), "laser": (210, 280), "lightning": (150, 45), "mortar": (60, 220)}
 
@@ -744,7 +745,7 @@ class Bot:
             boost = urgent and me["energy"] > 20
             label = "ZONE " + label
 
-        if self.recover and threats and not (urgent or must_go):
+        if self.recover and threats and not urgent:
             if self.cover is None or t - self.cover_t > 0.6:
                 self.cover = self.find_cover(me, threats, in_safe)
                 self.cover_t = t
@@ -816,6 +817,9 @@ class Bot:
                     cx, cy = norm2(c["pos"][0] - x, c["pos"][1] - y)
                     mx, my = mx * 0.5 + cx, my * 0.5 + cy
             boost = boost or (me["energy"] > 45 and (d > hi + 40 or d < lo * 0.7))
+        elif HIDE_MODE and not (urgent or must_go):
+            # nobody in sight: stand still and stay quiet, the zone code still moves us when needed
+            label = label or "still"
         elif not (urgent or must_go):
             goal = self.loot_goal(obs, me, in_safe, hpf)
             if goal is not None:
