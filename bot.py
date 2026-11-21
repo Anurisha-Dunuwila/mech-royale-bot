@@ -17,15 +17,15 @@ KITE = False  # tried it, practice score dropped 3.85 -> 3.38
 TACTICS = False  # scored 3.46
 DANGER_SCALE = 0.75  # we were overrating enemy damage and running too much
 # positioning, each one on its own so we can tell what helps
-COVER_PLUS = True     # if no full cover, take the spot hidden from the most enemies
-SAFE_RETREAT = True   # cover we can reach without walking past enemies
+COVER_PLUS = False    # if no full cover, take the spot hidden from the most enemies
+SAFE_RETREAT = False  # cover we can reach without walking past enemies
 PREDICT = False       # also hide from where enemies will be in 2 s
 DYN_STRAFE = True     # less predictable strafing
 SURROUND = False      # move toward the gap when enemies are on several sides (like KITE)
 HIGH_GROUND = False   # prefer higher ground when picking a zone spot
-BOTTLENECK = True     # don't park in narrow spots
-ZONE_SPOT = True      # wait in the next zone next to some walls, not in the open
-EARLY_ROTATE = True   # leave for the next zone sooner
+BOTTLENECK = False    # don't park in narrow spots
+ZONE_SPOT = False     # wait in the next zone next to some walls, not in the open
+EARLY_ROTATE = False  # leave for the next zone sooner
 # rough dps and range per weapon
 WDPS = {"gun": (187, 200), "laser": (210, 280), "lightning": (150, 45), "mortar": (60, 220)}
 
