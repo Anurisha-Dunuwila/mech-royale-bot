@@ -12,6 +12,7 @@ import mechfight as mf
 
 TAU = 2 * math.pi
 G = 2.0  # grid cell size in meters
+KITE = True
 
 WEAPON_RANK = {"laser": 3, "lightning": 2, "mortar": 1, "gun": 0}
 UPGRADE_SCORE = {
@@ -603,7 +604,18 @@ class Bot:
             else:
                 lo, hi = 30, 65  # gun hits much more often up close
             radial = -1.0 if d < lo else (0.8 if d > hi else 0.0)
-            if urgent or must_go:
+            group = [m for m in threats if m["_d"] < 160]
+            if KITE and len(group) >= 2 and not (urgent or must_go):
+                # several of them: back away from the group so they reach us one at a time
+                gx = sum(m["pos"][0] for m in group) / len(group) - x
+                gy = sum(m["pos"][1] for m in group) / len(group) - y
+                ax, ay = norm2(-gx, -gy)
+                mx, my = ax + tx * self.strafe * 0.4, ay + ty * self.strafe * 0.4
+                if not in_safe(x + mx * 20, y + my * 20):
+                    sx, sy = norm2(nc[0] - x, nc[1] - y)
+                    mx, my = mx * 0.3 + sx + tx * self.strafe * 0.6, my * 0.3 + sy + ty * self.strafe * 0.6
+                label = "KITE " + label
+            elif urgent or must_go:
                 mx, my = mx + tx * self.strafe * 0.5, my + ty * self.strafe * 0.5
             else:
                 mx = rx * radial + tx * self.strafe * 0.9
