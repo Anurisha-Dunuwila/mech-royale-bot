@@ -13,6 +13,8 @@ import mechfight as mf
 TAU = 2 * math.pi
 G = 2.0  # grid cell size in meters
 KITE = False  # tried it, practice score dropped 3.85 -> 3.38
+# like the 2nd place human game: don't start fights, only shoot back
+PASSIVE = True
 
 WEAPON_RANK = {"laser": 3, "lightning": 2, "mortar": 1, "gun": 0}
 UPGRADE_SCORE = {
@@ -263,6 +265,7 @@ class Bot:
         self.known_crates = {}
         self.roam = None
         self.attacker = None
+        self.hurt_by = {}
 
     def zone_at(self, z, t):
         s, e = z["shrink_start"], z["shrink_end"]
@@ -393,6 +396,7 @@ class Bot:
                     self.last_hurt = t
                 if ev.get("by") is not None and ev["by"] < 100:
                     self.attacker = (ev["by"], t)
+                    self.hurt_by[ev["by"]] = t
                 if ev.get("bearing") is not None and ev.get("weapon") != "zone":
                     self.threat = (ev["bearing"], t)
             elif ev["type"] == "hit":
@@ -469,6 +473,12 @@ class Bot:
         label = ""
         target = enemy
         tgt_is_mech = enemy is not None
+        engaged = True
+        if PASSIVE and enemy is not None:
+            engaged = (t - self.hurt_by.get(enemy["id"], -99) < 6
+                       or (enemy["_d"] < 45 and enemy["_los"])
+                       or (enemy["_los"] and enemy["_d"] < 120 and enemy["hp"] < 0.3 * enemy["max_hp"]))
+        hide = tgt_is_mech and not engaged and any(m["_los"] for m in threats)
         # don't poke npcs or crates when hurt, it resets regen
         if target is None and hpf > 0.75:
             cands = [n for n in npcs if math.dist(n["pos"], me["pos"]) < 100 and in_safe(n["pos"][0], n["pos"][1])]
@@ -493,7 +503,7 @@ class Bot:
 
         # while recovering only shoot back at someone right on top of us
         # but if we're getting hit anyway, holding fire gains nothing
-        hold_fire = self.recover and tgt_is_mech and not close and t - self.last_hurt > 1.0
+        hold_fire = (self.recover and tgt_is_mech and not close and t - self.last_hurt > 1.0) or (tgt_is_mech and not engaged)
 
         if target is not None:
             tc = self.center(target)
@@ -572,7 +582,7 @@ class Bot:
             boost = urgent and me["energy"] > 20
             label = "ZONE " + label
 
-        if self.recover and threats and not urgent:
+        if (self.recover or hide) and threats and not urgent:
             if self.cover is None or t - self.cover_t > 0.6:
                 self.cover = self.find_cover(me, threats, in_safe)
                 self.cover_t = t
@@ -589,7 +599,7 @@ class Bot:
             if t > self.strafe_until:
                 self.strafe = random.choice((-1, 1))
                 self.strafe_until = t + random.uniform(0.6, 1.6)
-        elif tgt_is_mech:
+        elif tgt_is_mech and engaged:
             ex, ey = target["pos"][0] - x, target["pos"][1] - y
             d = target["_d"]
             rx, ry = norm2(ex, ey)
