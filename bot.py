@@ -26,7 +26,7 @@ HIGH_GROUND = False   # prefer higher ground when picking a zone spot
 BOTTLENECK = False    # don't park in narrow spots
 ZONE_SPOT = False     # wait in the next zone next to some walls, not in the open
 EARLY_ROTATE = False  # leave for the next zone sooner
-HIDE_MODE = True      # no enemy in sight: stand still, no looting or exploring
+HIDE_MODE = True      # no enemy in sight: go next to a building and wait there
 # rough dps and range per weapon
 WDPS = {"gun": (187, 200), "laser": (210, 280), "lightning": (150, 45), "mortar": (60, 220)}
 
@@ -292,6 +292,7 @@ class Bot:
         self.cover_len = None
         self.strafe_amt = 0.9
         self.zspot = None
+        self.hspot = None
 
     def zone_at(self, z, t):
         s, e = z["shrink_start"], z["shrink_end"]
@@ -448,6 +449,25 @@ class Bot:
             n += math.hypot(qx - px, qy - py)
             px, py = qx, qy
         return n + math.hypot(gx - px, gy - py) * 1.3
+
+    def hide_spot(self, x, y, in_safe):
+        # closest walkable spot inside the safe area with buildings around it, but not boxed in
+        if self.map is None:
+            return None
+        best, bs = None, 1e9
+        for r in (0, 10, 20, 35, 50, 70):
+            for k in range(1 if r == 0 else 16):
+                a = k * TAU / 16
+                px, py = x + math.cos(a) * r, y + math.sin(a) * r
+                if not in_safe(px, py):
+                    continue
+                w = self.walls_near(px, py)
+                if w is None or w < 5 or w > 14:
+                    continue
+                sc = r - 3 * min(w, 12)
+                if sc < bs:
+                    best, bs = (px, py), sc
+        return best
 
     def walls_near(self, px, py):
         # blocked 4 m cells in the 5x5 block around a point, None if the point itself is blocked
@@ -818,8 +838,17 @@ class Bot:
                     mx, my = mx * 0.5 + cx, my * 0.5 + cy
             boost = boost or (me["energy"] > 45 and (d > hi + 40 or d < lo * 0.7))
         elif HIDE_MODE and not (urgent or must_go):
-            # nobody in sight: stand still and stay quiet, the zone code still moves us when needed
-            label = label or "still"
+            # nobody in sight: wait next to a building. weapons in reach still get picked up above
+            key = (round(nc[0]), round(nc[1]), round(nr))
+            if self.hspot is None or self.hspot[0] != key or not in_safe(*self.hspot[1]):
+                self.hspot = (key, self.hide_spot(x, y, in_safe) or safe)
+            hx, hy = self.hspot[1]
+            dh = math.hypot(hx - x, hy - y)
+            if dh > 3:
+                mx, my = self.nav_dir(me, t, hx, hy)
+                if dh < 40:
+                    mx, my = mx * 0.4, my * 0.4  # quiet near the spot
+            label = label or "hide"
         elif not (urgent or must_go):
             goal = self.loot_goal(obs, me, in_safe, hpf)
             if goal is not None:
