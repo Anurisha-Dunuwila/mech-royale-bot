@@ -256,6 +256,10 @@ class Bot:
         self.recover = False
         self.cover = None
         self.cover_t = -99.0
+        # things we've seen but can't see right now: id -> (x, y, z, kind)
+        self.known_pickups = {}
+        self.known_crates = {}
+        self.roam = None
 
     def zone_at(self, z, t):
         s, e = z["shrink_start"], z["shrink_end"]
@@ -439,7 +443,9 @@ class Bot:
 
         # recover mode: hide and let regen work (needs regen_delay s without dealing/taking damage)
         outnumbered = sum(1 for m in threats if m["_los"]) >= 2
-        if not self.recover and (hpf < 0.45 or (outnumbered and hpf < 0.7)):
+        self.remember(obs, me)
+
+        if not self.recover and (hpf < 0.5 or (outnumbered and hpf < 0.7)):
             self.recover = True
         elif self.recover and hpf > 0.9:
             self.recover = False
@@ -592,12 +598,25 @@ class Bot:
                 if not in_safe(x + mx * 15, y + my * 15):
                     sx, sy = norm2(nc[0] - x, nc[1] - y)
                     mx, my = mx * 0.4 + sx, my * 0.4 + sy
+                # cubes dropped mid-fight are worth a small detour
+                near_cubes = [c for c in obs.get("cubes", []) if math.hypot(c["pos"][0] - x, c["pos"][1] - y) < 14]
+                if near_cubes:
+                    c = min(near_cubes, key=lambda c: math.hypot(c["pos"][0] - x, c["pos"][1] - y))
+                    cx, cy = norm2(c["pos"][0] - x, c["pos"][1] - y)
+                    mx, my = mx * 0.5 + cx, my * 0.5 + cy
             boost = boost or (me["energy"] > 45 and (d > hi + 40 or d < lo * 0.7))
         elif not (urgent or must_go):
             goal = self.loot_goal(obs, me, in_safe, hpf)
             if goal is not None:
                 mx, my = self.nav_dir(me, t, goal[0], goal[1])
                 label = label or goal[2]
+            elif hpf > 0.7 and (w1 is None or t < 150):
+                # nothing known nearby: look around for loot instead of standing still
+                if (self.roam is None or t > self.roam[2] or not in_safe(self.roam[0], self.roam[1])
+                        or math.hypot(self.roam[0] - x, self.roam[1] - y) < 10):
+                    self.roam = self.pick_roam(x, y, nc, nr - margin, t)
+                mx, my = self.nav_dir(me, t, self.roam[0], self.roam[1])
+                label = label or "explore"
             else:
                 dsafe = math.hypot(safe[0] - x, safe[1] - y)
                 if dsafe > 8:
@@ -671,12 +690,19 @@ class Bot:
             d = math.hypot(c["pos"][0] - x, c["pos"][1] - y)
             if d < 160 and in_safe(c["pos"][0], c["pos"][1]) and abs(c["pos"][2] - z) < 25 and d * 0.7 < bs:
                 bs, best = d * 0.7, (c["pos"][0], c["pos"][1], "cube")
-        for p in obs.get("pickups", []):
-            if p["kind"] in held or WEAPON_RANK.get(p["kind"], 0) <= cur_rank:
+        for px, py, pz, kind in self.known_pickups.values():
+            if kind in held or WEAPON_RANK.get(kind, 0) <= cur_rank:
                 continue
-            d = math.hypot(p["pos"][0] - x, p["pos"][1] - y)
-            if d < 160 and in_safe(p["pos"][0], p["pos"][1]) and abs(p["pos"][2] - z) < 25 and d * 0.8 < bs:
-                bs, best = d * 0.8, (p["pos"][0], p["pos"][1], "weapon " + p["kind"])
+            d = math.hypot(px - x, py - y)
+            # an empty second slot makes any weapon worth a long walk
+            w = 0.5 if w1 is None else 0.8
+            if d < 250 and in_safe(px, py) and abs(pz - z) < 20 and d * w < bs:
+                bs, best = d * w, (px, py, "weapon " + kind)
+        if hpf > 0.9:
+            for cx, cy, cz, _ in self.known_crates.values():
+                d = math.hypot(cx - x, cy - y)
+                if d < 200 and in_safe(cx, cy) and abs(cz - z) < 15 and d * 1.2 < bs:
+                    bs, best = d * 1.2, (cx, cy, "crate")
         for dr in obs.get("drops", []):
             d = math.hypot(dr["pos"][0] - x, dr["pos"][1] - y)
             if dr.get("holder") not in (None, me["id"]) and dr.get("progress", 0) > 2.5:
@@ -686,6 +712,33 @@ class Bot:
             if d < 180 and in_safe(dr["pos"][0], dr["pos"][1]) and d / 11.7 > dr.get("lands_in", 0) - 8 and d * w < bs:
                 bs, best = d * w, (dr["pos"][0], dr["pos"][1], "drop")
         return best
+
+    def remember(self, obs, me):
+        x, y, z = me["pos"]
+        eye = (x, y, z + me["stats"].get("eye_height", 8))
+        for store, items in ((self.known_pickups, obs.get("pickups", [])), (self.known_crates, obs.get("crates", []))):
+            seen = set()
+            for p in items:
+                store[p["id"]] = (p["pos"][0], p["pos"][1], p["pos"][2], p.get("kind", "crate"))
+                seen.add(p["id"])
+            # forget things that should be in view but aren't (taken or destroyed)
+            for pid, (px, py, pz, _) in list(store.items()):
+                if pid not in seen and math.hypot(px - x, py - y) < 35 and self.los(eye, (px, py, pz + 1)):
+                    del store[pid]
+        for ev in obs.get("events", []):
+            if ev["type"] == "take_failed" and ev.get("reason") == "gone":
+                self.known_pickups.pop(ev.get("id"), None)
+            elif ev["type"] == "took":
+                self.known_pickups.pop(ev.get("id"), None)
+
+    def pick_roam(self, x, y, nc, r, t):
+        for _ in range(20):
+            a = random.uniform(0, TAU)
+            d = random.uniform(30, 110)
+            px, py = x + math.cos(a) * d, y + math.sin(a) * d
+            if math.hypot(px - nc[0], py - nc[1]) < r and (self.map is None or not self.map.wall_at(px, py, self.map.ground(px, py))):
+                return (px, py, t + 20)
+        return (nc[0], nc[1], t + 20)
 
     def dodge(self, obs, me):
         x, y, z = me["pos"]
