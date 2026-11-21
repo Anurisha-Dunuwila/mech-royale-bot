@@ -14,7 +14,11 @@ TAU = 2 * math.pi
 G = 2.0  # grid cell size in meters
 KITE = False  # tried it, practice score dropped 3.85 -> 3.38
 # like the 2nd place human game: don't start fights, only shoot back
-PASSIVE = True
+PASSIVE = False  # helped in the sim, real score dropped 3.85 -> 3.56
+# score is basically kills, these push for more of them
+FOCUS = True  # prefer weak targets and ones facing away (rear hits 1.5x)
+HUNT = False   # go after enemies we saw recently when healthy
+BRAVE = False  # stay in the fight longer before hiding
 
 WEAPON_RANK = {"laser": 3, "lightning": 2, "mortar": 1, "gun": 0}
 UPGRADE_SCORE = {
@@ -266,6 +270,7 @@ class Bot:
         self.roam = None
         self.attacker = None
         self.hurt_by = {}
+        self.seen = {}
 
     def zone_at(self, z, t):
         s, e = z["shrink_start"], z["shrink_end"]
@@ -376,6 +381,17 @@ class Bot:
         s = 1 + 0.05 * (m.get("cubes") or 0)
         return (m["pos"][0], m["pos"][1], m["pos"][2] + 4.5 * s)
 
+    def hunt_spot(self, x, y, t, in_safe):
+        best = None
+        for mid, (p, ts) in list(self.seen.items()):
+            if t - ts > 20:
+                del self.seen[mid]
+                continue
+            d = math.hypot(p[0] - x, p[1] - y)
+            if 15 < d < 250 and in_safe(p[0], p[1]) and (best is None or d < best[0]):
+                best = (d, p[0], p[1])
+        return best[1:] if best else None
+
     def act(self, obs):
         me = obs["self"]
         t = obs["t"]
@@ -429,12 +445,24 @@ class Bot:
             m["_d"] = math.dist(m["pos"], me["pos"])
             m["_los"] = self.los(muz, self.center(m))
         threats = [m for m in mechs if m["_d"] < 220]
+        for m in mechs:
+            self.seen[m["id"]] = (m["pos"], t)
+        for ev in obs.get("events", []):
+            if ev["type"] == "kill":
+                self.seen.pop(ev.get("target"), None)
         enemy = None
         if mechs:
             atk = self.attacker[0] if self.attacker and t - self.attacker[1] < 3 else None
 
             def score(m):
-                s = m["_d"] * (0.6 if m["_los"] else 1.0) * (0.7 + 0.6 * m["hp"] / max(1, m["max_hp"]))
+                hf = m["hp"] / max(1, m["max_hp"])
+                if FOCUS:
+                    s = m["_d"] * (0.6 if m["_los"] else 1.0) * (0.35 + 0.9 * hf)
+                    back = math.atan2(y - m["pos"][1], x - m["pos"][0])
+                    if abs(wrap(m["aim"][0] - back)) > 1.8:
+                        s *= 0.75
+                else:
+                    s = m["_d"] * (0.6 if m["_los"] else 1.0) * (0.7 + 0.6 * hf)
                 return s * 0.6 if m["id"] == atk else s  # shoot whoever is shooting us
 
             enemy = min(mechs, key=score)
@@ -462,7 +490,8 @@ class Bot:
         outnumbered = sum(1 for m in threats if m["_los"]) >= 2
         self.remember(obs, me)
 
-        if not self.recover and (hpf < 0.5 or (outnumbered and hpf < 0.7)):
+        lo_hp, lo_out = (0.35, 0.55) if BRAVE else (0.5, 0.7)
+        if not self.recover and (hpf < lo_hp or (outnumbered and hpf < lo_out)):
             self.recover = True
         elif self.recover and hpf > 0.9:
             self.recover = False
@@ -645,6 +674,10 @@ class Bot:
             if goal is not None:
                 mx, my = self.nav_dir(me, t, goal[0], goal[1])
                 label = label or goal[2]
+            elif HUNT and hpf > 0.9 and self.hunt_spot(x, y, t, in_safe):
+                hx, hy = self.hunt_spot(x, y, t, in_safe)
+                mx, my = self.nav_dir(me, t, hx, hy)
+                label = label or "hunt"
             elif hpf > 0.7 and (w1 is None or t < 150):
                 # nothing known nearby: look around for loot instead of standing still
                 if (self.roam is None or t > self.roam[2] or not in_safe(self.roam[0], self.roam[1])
