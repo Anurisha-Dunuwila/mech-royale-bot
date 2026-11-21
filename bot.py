@@ -18,12 +18,12 @@ TACTICS = False  # scored 3.46
 DANGER_SCALE = 0.75  # we were overrating enemy damage and running too much
 # positioning, each one on its own so we can tell what helps
 COVER_PLUS = False    # if no full cover, take the spot hidden from the most enemies
-SAFE_RETREAT = True   # cover we can reach without walking past enemies
+SAFE_RETREAT = False  # cover we can reach without walking past enemies
 PREDICT = False       # also hide from where enemies will be in 2 s
 DYN_STRAFE = True     # less predictable strafing
 SURROUND = False      # move toward the gap when enemies are on several sides (like KITE)
 HIGH_GROUND = False   # prefer higher ground when picking a zone spot
-BOTTLENECK = False    # don't park in narrow spots
+BOTTLENECK = True     # don't park in narrow spots
 ZONE_SPOT = False     # wait in the next zone next to some walls, not in the open
 EARLY_ROTATE = False  # leave for the next zone sooner
 # rough dps and range per weapon
@@ -448,6 +448,29 @@ class Bot:
             px, py = qx, qy
         return n + math.hypot(gx - px, gy - py) * 1.3
 
+    def walls_near(self, px, py):
+        # blocked 4 m cells in the 5x5 block around a point, None if the point itself is blocked
+        M = self.map
+        C = 2 * G
+        i, j = int((px - M.gx0) / C), int((py - M.gy0) / C)
+        if not (2 < i < M.nx4 - 3 and 2 < j < M.ny4 - 3) or M.blk[j * M.nx4 + i]:
+            return None
+        return sum(M.blk[(j + dj) * M.nx4 + i + di] for dj in range(-2, 3) for di in range(-2, 3))
+
+    def open_spot(self, px, py, in_safe):
+        # nearest spot around (px, py) that isn't a narrow passage
+        w = self.walls_near(px, py)
+        if w is not None and w < 10:
+            return px, py
+        for r in (8, 16, 24):
+            for k in range(12):
+                a = k * TAU / 12
+                qx, qy = px + math.cos(a) * r, py + math.sin(a) * r
+                w = self.walls_near(qx, qy)
+                if w is not None and w < 10 and in_safe(qx, qy):
+                    return qx, qy
+        return px, py
+
     def zone_spot(self, nc, rmax, x, y):
         # a walkable spot in the next zone with some walls around it but not boxed in
         if self.map is None or rmax < 10:
@@ -570,6 +593,9 @@ class Bot:
         def in_safe(px, py):
             return (math.hypot(px - nc[0], py - nc[1]) < nr - margin * 0.5
                     and math.hypot(px - cc[0], py - cc[1]) < cr - 8)
+
+        if BOTTLENECK and not ZONE_SPOT and self.map is not None:
+            safe = self.open_spot(safe[0], safe[1], in_safe)
 
         # recover mode: hide and let regen work (needs regen_delay s without dealing/taking damage)
         outnumbered = sum(1 for m in threats if m["_los"]) >= 2
