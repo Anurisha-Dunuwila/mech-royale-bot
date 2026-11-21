@@ -28,7 +28,8 @@ ZONE_SPOT = False     # wait in the next zone next to some walls, not in the ope
 EARLY_ROTATE = False  # leave for the next zone sooner
 HIDE_MODE = False     # no enemy in sight: go next to a building and wait there
 HP_BANDS = True       # >70% fight, 40-70% back off only vs stronger or outnumbered, <40% escape (3.96)
-ZONE_FIRST = True     # when hurt and the zone is closing, go to the zone instead of cover
+ZONE_FIRST = False    # when hurt and the zone is closing, go to the zone instead of cover
+BOOST_BANDS = True    # <60% back off with boost while shooting, <40% boost out, no boost when alone
 # rough dps and range per weapon
 WDPS = {"gun": (187, 200), "laser": (210, 280), "lightning": (150, 45), "mortar": (60, 220)}
 
@@ -639,6 +640,7 @@ class Bot:
         elif self.recover and hpf > 0.9:
             self.recover = False
         close = [m for m in threats if m["_d"] < 45 and m["_los"]]
+        near = [m for m in threats if m["_d"] < 100 and m["_los"]]
 
         if TACTICS:
             while self.dmg_log and t - self.dmg_log[0][0] > 2.0:
@@ -699,6 +701,8 @@ class Bot:
         # while recovering only shoot back at someone right on top of us
         # but if we're getting hit anyway, holding fire gains nothing
         hold_fire = (self.recover and tgt_is_mech and not close and t - self.last_hurt > 1.0) or (panic and tgt_is_mech and not close)
+        if BOOST_BANDS and near and 0.4 <= hpf < 0.6:
+            hold_fire = False  # backing off but still shooting
 
         if target is not None:
             tc = self.center(target)
@@ -880,6 +884,22 @@ class Bot:
                     if dsafe < 40:
                         mx, my = mx * 0.4, my * 0.4  # under 5 m/s makes no footstep sound
                 label = label or "hold"
+
+        if BOOST_BANDS:
+            if near and hpf < 0.4:
+                boost = me["energy"] > 10
+            elif near and hpf < 0.6:
+                if not self.recover and not (urgent or must_go):
+                    e = min(near, key=lambda m: m["_d"])
+                    ax, ay = norm2(x - e["pos"][0], y - e["pos"][1])
+                    mx, my = ax - ay * self.strafe * 0.5, ay + ax * self.strafe * 0.5
+                    if not in_safe(x + mx * 20, y + my * 20):
+                        sx, sy = norm2(nc[0] - x, nc[1] - y)
+                        mx, my = mx * 0.4 + sx, my * 0.4 + sy
+                    label = "BACKOFF " + label
+                boost = me["energy"] > 20
+            elif not near and not urgent:
+                boost = False  # nobody around, save energy
 
         dmx, dmy = self.dodge(obs, me)
         if dmx or dmy:
