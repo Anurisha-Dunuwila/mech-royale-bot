@@ -13,15 +13,11 @@ import mechfight as mf
 TAU = 2 * math.pi
 G = 2.0  # grid cell size in meters
 KITE = False  # tried it, practice score dropped 3.85 -> 3.38
-# bail out early when the damage coming in would kill us before we reach cover,
-# and avoid targets whose friends can also shoot us
-DANGER = True
-# rough dps and range per weapon, only used to compare fights
+# careful fight-or-flight on top of the 3.85 bot, False gives the 3.85 bot back
+TACTICS = True
+DANGER_SCALE = 0.75  # we were overrating enemy damage and running too much
+# rough dps and range per weapon
 WDPS = {"gun": (187, 200), "laser": (210, 280), "lightning": (150, 45), "mortar": (60, 220)}
-ISO_RADIUS = 80     # friends of a target this close to it count against it
-ISO_PENALTY = 0.4   # per friend that can also hit us
-ESC_MARGIN = 1.5    # extra seconds on top of the walk to cover
-CRIT_HP = 0.25      # don't let a fight take us below this
 
 WEAPON_RANK = {"laser": 3, "lightning": 2, "mortar": 1, "gun": 0}
 UPGRADE_SCORE = {
@@ -273,6 +269,8 @@ class Bot:
         self.roam = None
         self.attacker = None
         self.dmg_log = deque()
+        self.tgt_id = None
+        self.panic_until = -99.0
         self.cover_len = None
 
     def zone_at(self, z, t):
@@ -394,7 +392,7 @@ class Bot:
             elif k == "laser":
                 acc = 0.7
             elif k == "mortar":
-                acc = 0.3 if los else 0.15  # can lob over walls
+                acc = 0.3 if los else 0.15
             else:
                 acc = 1.0
             if los or k == "mortar":
@@ -402,10 +400,9 @@ class Bot:
         return tot * (1 + 0.04 * (cubes or 0))
 
     def threat_dps(self, m, x, y):
-        # how much of its dps is actually headed our way
         a = abs(wrap(m["aim"][0] - math.atan2(y - m["pos"][1], x - m["pos"][0])))
         facing = 1.0 if a < 0.35 else (0.5 if a < 1.0 else 0.2)
-        return self.dps(m.get("weapons") or [], m["_d"], m.get("cubes"), m["_los"]) * facing
+        return self.dps(m.get("weapons") or [], m["_d"], m.get("cubes"), m["_los"]) * facing * DANGER_SCALE
 
     def path_len(self, me, gx, gy):
         x, y = me["pos"][0], me["pos"][1]
@@ -416,7 +413,6 @@ class Bot:
         for qx, qy in pts:
             n += math.hypot(qx - px, qy - py)
             px, py = qx, qy
-        # path gave up early: guess the rest
         return n + math.hypot(gx - px, gy - py) * 1.3
 
     def act(self, obs):
@@ -472,21 +468,23 @@ class Bot:
             m["_d"] = math.dist(m["pos"], me["pos"])
             m["_los"] = self.los(muz, self.center(m))
         threats = [m for m in mechs if m["_d"] < 220]
-        # enemies that can hit us right now
-        uniq = {m["id"]: m for m in threats}
-        shooters = [m for m in uniq.values() if self.dps(m.get("weapons") or [], m["_d"], m.get("cubes"), m["_los"]) > 0]
         enemy = None
         if mechs:
             atk = self.attacker[0] if self.attacker and t - self.attacker[1] < 3 else None
 
             def score(m):
                 s = m["_d"] * (0.6 if m["_los"] else 1.0) * (0.7 + 0.6 * m["hp"] / max(1, m["max_hp"]))
-                if DANGER:
-                    # fighting next to its friends means they shoot us too
-                    s *= 1 + ISO_PENALTY * sum(1 for o in shooters if o["id"] != m["id"] and math.dist(o["pos"], m["pos"]) < ISO_RADIUS)
+                if TACTICS and m["hp"] < 0.5 * m["max_hp"]:
+                    s *= 0.7  # already hurt, finish it
                 return s * 0.6 if m["id"] == atk else s  # shoot whoever is shooting us
 
             enemy = min(mechs, key=score)
+            if TACTICS:
+                cur = next((m for m in mechs if m["id"] == self.tgt_id), None)
+                # stick with the current target unless the new one is clearly better
+                if cur is not None and score(enemy) > 0.7 * score(cur):
+                    enemy = cur
+                self.tgt_id = enemy["id"]
 
         # zone
         nc, nr = zone["next_center"], zone["next_radius"]
@@ -517,39 +515,34 @@ class Bot:
             self.recover = False
         close = [m for m in threats if m["_d"] < 45 and m["_los"]]
 
-        if DANGER and not self.recover and shooters:
+        if TACTICS:
             while self.dmg_log and t - self.dmg_log[0][0] > 2.0:
                 self.dmg_log.popleft()
             incoming = sum(a for _, a in self.dmg_log) / 2.0
-            predicted = sum(self.threat_dps(m, x, y) for m in shooters)
-            # damage already on the way: lasers charging at us, bullets about to land
-            burst = 0.0
-            for m in shooters:
-                if m.get("charging") and abs(wrap(m["aim"][0] - math.atan2(y - m["pos"][1], x - m["pos"][0]))) < 0.15:
-                    burst += 315 * 0.7 * (1 + 0.04 * (m.get("cubes") or 0))
-            for pr in obs.get("projectiles", []):
-                if pr["kind"] == "gun" and math.dist(pr["pos"], me["pos"]) < 40:
-                    burst += 45 * 0.5
-            # measured and predicted are the same enemies, so take the larger, don't add
+            uniq = {m["id"]: m for m in threats}
+            predicted = sum(self.threat_dps(m, x, y) for m in uniq.values())
             rate = max(incoming, predicted, 1.0)
-            hp_left = me["hp"] - burst
-            ttd = hp_left / rate
+            ttd = me["hp"] / rate
             ttk = 1e9
             if enemy is not None and enemy["_los"]:
                 ttk = enemy["hp"] / max(1.0, self.dps(list(kinds), enemy["_d"], me.get("cubes")))
-            # we win the race to the kill with hp to spare: keep fighting
-            winning = hp_left - rate * ttk > CRIT_HP * me["max_hp"]
-            if not winning and ttd < 15:
-                if self.cover is None or t - self.cover_t > 1.0:
-                    self.cover = self.find_cover(me, threats, in_safe)
-                    self.cover_t = t
-                    self.cover_len = self.path_len(me, *self.cover) if self.cover else None
-                if self.cover and self.cover_len is not None:
-                    escape = self.cover_len / speed + 0.5  # +0.5 for bumping into stuff
-                else:
-                    escape = 4.0
-                if ttd < escape + ESC_MARGIN:
-                    self.recover = True
+            if ttd < 1.5 or (hpf < 0.2 and incoming > 0):
+                # about to die: get out now
+                self.panic_until = t + 1.5
+                self.recover = True
+            elif not self.recover:
+                # only leave when we'd clearly die first; healthier means braver
+                losing = ttk > ttd * (1.5 + 0.5 * hpf)
+                serious = incoming > 0.15 * me["max_hp"]
+                if losing and serious:
+                    if self.cover is None or t - self.cover_t > 1.0:
+                        self.cover = self.find_cover(me, threats, in_safe)
+                        self.cover_t = t
+                        self.cover_len = self.path_len(me, *self.cover) if self.cover else None
+                    escape = self.cover_len / speed + 0.5 if (self.cover and self.cover_len is not None) else 4.0
+                    if ttd < escape + 1.5:
+                        self.recover = True
+        panic = t < self.panic_until
 
         aim = None
         fire0 = fire1 = False
@@ -580,7 +573,7 @@ class Bot:
 
         # while recovering only shoot back at someone right on top of us
         # but if we're getting hit anyway, holding fire gains nothing
-        hold_fire = self.recover and tgt_is_mech and not close and t - self.last_hurt > 1.0
+        hold_fire = (self.recover and tgt_is_mech and not close and t - self.last_hurt > 1.0) or (panic and tgt_is_mech and not close)
 
         if target is not None:
             tc = self.center(target)
@@ -673,6 +666,8 @@ class Bot:
                 mx, my = -ex - ey * self.strafe * 0.8, -ey + ex * self.strafe * 0.8
                 label = "RUN " + label
             boost = me["energy"] > 20 and bool(close or any(m["_los"] for m in threats))
+            if panic:
+                boost = me["energy"] > 10
             if t > self.strafe_until:
                 self.strafe = random.choice((-1, 1))
                 self.strafe_until = t + random.uniform(0.6, 1.6)
