@@ -32,7 +32,7 @@ ZONE_FIRST = False    # when hurt and the zone is closing, go to the zone instea
 BOOST_BANDS = False   # <60% back off with boost while shooting, <40% boost out, no boost when alone
 ATTACK_UPGRADES = False  # take damage and fire rate upgrades before armor and regen (3.83)
 # farm crates and drones for cubes: each cube is +4% hp and damage, upgrades at 1/3/6/10/15/21
-FARM = True
+FARM = False  # scored 3.77
 # rough dps and range per weapon
 WDPS = {"gun": (187, 200), "laser": (210, 280), "lightning": (150, 45), "mortar": (60, 220)}
 
