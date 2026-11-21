@@ -260,6 +260,7 @@ class Bot:
         self.known_pickups = {}
         self.known_crates = {}
         self.roam = None
+        self.attacker = None
 
     def zone_at(self, z, t):
         s, e = z["shrink_start"], z["shrink_end"]
@@ -386,7 +387,10 @@ class Bot:
 
         for ev in obs.get("events", []):
             if ev["type"] == "damaged":
-                self.last_hurt = t
+                if ev.get("weapon") != "zone":
+                    self.last_hurt = t
+                if ev.get("by") is not None and ev["by"] < 100:
+                    self.attacker = (ev["by"], t)
                 if ev.get("bearing") is not None and ev.get("weapon") != "zone":
                     self.threat = (ev["bearing"], t)
             elif ev["type"] == "hit":
@@ -421,7 +425,13 @@ class Bot:
         threats = [m for m in mechs if m["_d"] < 220]
         enemy = None
         if mechs:
-            enemy = min(mechs, key=lambda m: m["_d"] * (0.6 if m["_los"] else 1.0) * (0.7 + 0.6 * m["hp"] / max(1, m["max_hp"])))
+            atk = self.attacker[0] if self.attacker and t - self.attacker[1] < 3 else None
+
+            def score(m):
+                s = m["_d"] * (0.6 if m["_los"] else 1.0) * (0.7 + 0.6 * m["hp"] / max(1, m["max_hp"]))
+                return s * 0.6 if m["id"] == atk else s  # shoot whoever is shooting us
+
+            enemy = min(mechs, key=score)
 
         # zone
         nc, nr = zone["next_center"], zone["next_radius"]
@@ -434,7 +444,8 @@ class Bot:
         must_go = (d_cur > cr - 12) or (t > zone["shrink_start"] - travel - 20 and d_next > nr - margin)
         urgent = (not me["in_zone"]) or d_cur > cr - 4
         ux, uy = ((x - nc[0]) / d_next, (y - nc[1]) / d_next) if d_next > 1 else (0.0, 0.0)
-        rr = max(0.0, min(d_next, nr - margin))
+        # sit a bit inside the next circle, not on its edge, so the following circle is never far
+        rr = max(0.0, min(d_next, (nr - margin) * 0.65))
         safe = (nc[0] + ux * rr, nc[1] + uy * rr)
 
         def in_safe(px, py):
@@ -479,7 +490,8 @@ class Bot:
                 break
 
         # while recovering only shoot back at someone right on top of us
-        hold_fire = self.recover and tgt_is_mech and not close
+        # but if we're getting hit anyway, holding fire gains nothing
+        hold_fire = self.recover and tgt_is_mech and not close and t - self.last_hurt > 1.0
 
         if target is not None:
             tc = self.center(target)
