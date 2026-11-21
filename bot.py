@@ -12,7 +12,7 @@ import mechfight as mf
 
 TAU = 2 * math.pi
 G = 2.0  # grid cell size in meters
-KITE = True
+KITE = False  # tried it, practice score dropped 3.85 -> 3.38
 
 WEAPON_RANK = {"laser": 3, "lightning": 2, "mortar": 1, "gun": 0}
 UPGRADE_SCORE = {
