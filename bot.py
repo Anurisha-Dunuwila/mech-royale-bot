@@ -16,9 +16,14 @@ KITE = False  # tried it, practice score dropped 3.85 -> 3.38
 # like the 2nd place human game: don't start fights, only shoot back
 PASSIVE = False  # helped in the sim, real score dropped 3.85 -> 3.56
 # score is basically kills, these push for more of them
-FOCUS = True  # prefer weak targets and ones facing away (rear hits 1.5x)
+FOCUS = False  # prefer weak targets and ones facing away (rear hits 1.5x)
 HUNT = False   # go after enemies we saw recently when healthy
 BRAVE = False  # stay in the fight longer before hiding
+# threat scoring, fight-or-flight, isolation, target stickiness, damage tracking
+TACTICS = True
+
+# rough dps and range per weapon, only used to compare fights
+WDPS = {"gun": (187, 200), "laser": (210, 280), "lightning": (150, 45), "mortar": (60, 220)}
 
 WEAPON_RANK = {"laser": 3, "lightning": 2, "mortar": 1, "gun": 0}
 UPGRADE_SCORE = {
@@ -271,6 +276,11 @@ class Bot:
         self.attacker = None
         self.hurt_by = {}
         self.seen = {}
+        self.dmg_log = deque()
+        self.tgt_id = None
+        self.tgt_score = 0.0
+        self.flee_until = -99.0
+        self.panic_until = -99.0
 
     def zone_at(self, z, t):
         s, e = z["shrink_start"], z["shrink_end"]
@@ -392,6 +402,10 @@ class Bot:
                 best = (d, p[0], p[1])
         return best[1:] if best else None
 
+    def dps(self, kinds, d, cubes):
+        tot = sum(WDPS[k][0] for k in kinds if k in WDPS and d < WDPS[k][1])
+        return tot * (1 + 0.04 * (cubes or 0))
+
     def act(self, obs):
         me = obs["self"]
         t = obs["t"]
@@ -408,6 +422,7 @@ class Bot:
 
         for ev in obs.get("events", []):
             if ev["type"] == "damaged":
+                self.dmg_log.append((t, ev.get("amount", 0)))
                 if ev.get("weapon") != "zone":
                     self.last_hurt = t
                 if ev.get("by") is not None and ev["by"] < 100:
@@ -467,6 +482,35 @@ class Bot:
 
             enemy = min(mechs, key=score)
 
+            if TACTICS:
+                my_kinds = list(kinds)
+
+                def tscore(m):
+                    # roughly: seconds to kill it, made worse by friends near it
+                    hp = m["hp"] + 0.0
+                    d = m["_d"]
+                    s = hp / max(30.0, self.dps(my_kinds, d, me.get("cubes")) or 30.0) + d / 25.0
+                    if not m["_los"]:
+                        s *= 1.6
+                    friends = sum(1 for o in mechs if o is not m and math.dist(o["pos"], m["pos"]) < 50)
+                    s *= 1 + 0.5 * friends
+                    if hp < 0.5 * m["max_hp"]:
+                        s *= 0.7  # already hurt, finish it
+                    back = math.atan2(y - m["pos"][1], x - m["pos"][0])
+                    if abs(wrap(m["aim"][0] - back)) > 1.8:
+                        s *= 0.8
+                    if m["id"] == atk:
+                        s *= 0.7
+                    return s
+
+                best = min(mechs, key=tscore)
+                cur = next((m for m in mechs if m["id"] == self.tgt_id), None)
+                # don't flip between targets unless the new one is clearly better
+                if cur is not None and tscore(best) > 0.7 * tscore(cur):
+                    best = cur
+                enemy = best
+                self.tgt_id = enemy["id"]
+
         # zone
         nc, nr = zone["next_center"], zone["next_radius"]
         cc, cr = self.zone_at(zone, t + 4)
@@ -497,6 +541,32 @@ class Bot:
             self.recover = False
         close = [m for m in threats if m["_d"] < 45 and m["_los"]]
 
+        if TACTICS:
+            while self.dmg_log and t - self.dmg_log[0][0] > 2.0:
+                self.dmg_log.popleft()
+            incoming = sum(a for _, a in self.dmg_log) / 2.0
+            shooters = [m for m in threats if m["_los"] and self.dps(m.get("weapons") or [], m["_d"], m.get("cubes")) > 0]
+            danger = sum(self.dps(m.get("weapons") or [], m["_d"], m.get("cubes")) for m in shooters)
+            # assume about half their shots land
+            ttd = me["hp"] / max(incoming, danger * 0.5, 1.0)
+            ttk = 1e9
+            if enemy is not None and enemy["_los"]:
+                ttk = enemy["hp"] / max(1.0, self.dps(list(kinds), enemy["_d"], me.get("cubes")))
+            nerve = hpf / (1 + 0.5 * max(0, len(shooters) - 1))
+            if urgent or must_go:
+                nerve *= 0.7
+            if ttd < 2.0 or (hpf < 0.25 and incoming > 0):
+                self.panic_until = t + 1.5
+                self.recover = True
+            elif incoming > 0 and ttd < 4.0:
+                self.recover = True  # get out before it's critical
+            if len(shooters) >= 2 and ttk > 1.5:
+                self.flee_until = t + 1.5
+            elif shooters and ttk > ttd * (0.6 + nerve):
+                self.flee_until = t + 1.5
+        panic = t < self.panic_until
+        fleeing = t < self.flee_until
+
         aim = None
         fire0 = fire1 = False
         label = ""
@@ -507,7 +577,7 @@ class Bot:
             engaged = (t - self.hurt_by.get(enemy["id"], -99) < 6
                        or (enemy["_d"] < 45 and enemy["_los"])
                        or (enemy["_los"] and enemy["_d"] < 120 and enemy["hp"] < 0.3 * enemy["max_hp"]))
-        hide = tgt_is_mech and not engaged and any(m["_los"] for m in threats)
+        hide = (tgt_is_mech and not engaged and any(m["_los"] for m in threats)) or panic or fleeing
         # don't poke npcs or crates when hurt, it resets regen
         if target is None and hpf > 0.75:
             cands = [n for n in npcs if math.dist(n["pos"], me["pos"]) < 100 and in_safe(n["pos"][0], n["pos"][1])]
@@ -532,7 +602,7 @@ class Bot:
 
         # while recovering only shoot back at someone right on top of us
         # but if we're getting hit anyway, holding fire gains nothing
-        hold_fire = (self.recover and tgt_is_mech and not close and t - self.last_hurt > 1.0) or (tgt_is_mech and not engaged)
+        hold_fire = (self.recover and tgt_is_mech and not close and t - self.last_hurt > 1.0) or (tgt_is_mech and not engaged) or (panic and not close)
 
         if target is not None:
             tc = self.center(target)
@@ -625,6 +695,9 @@ class Bot:
                 mx, my = -ex - ey * self.strafe * 0.8, -ey + ex * self.strafe * 0.8
                 label = "RUN " + label
             boost = me["energy"] > 20 and bool(close or any(m["_los"] for m in threats))
+            if panic:
+                boost = me["energy"] > 10
+                label = "PANIC " + label
             if t > self.strafe_until:
                 self.strafe = random.choice((-1, 1))
                 self.strafe_until = t + random.uniform(0.6, 1.6)
