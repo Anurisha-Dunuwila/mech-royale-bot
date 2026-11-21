@@ -29,11 +29,20 @@ EARLY_ROTATE = False  # leave for the next zone sooner
 HIDE_MODE = False     # no enemy in sight: go next to a building and wait there
 HP_BANDS = True       # >70% fight, 40-70% back off only vs stronger or outnumbered, <40% escape (3.96)
 ZONE_FIRST = False    # when hurt and the zone is closing, go to the zone instead of cover
-BOOST_BANDS = True    # <60% back off with boost while shooting, <40% boost out, no boost when alone
+BOOST_BANDS = False   # <60% back off with boost while shooting, <40% boost out, no boost when alone
+ATTACK_UPGRADES = True  # take damage and fire rate upgrades before armor and regen
 # rough dps and range per weapon
 WDPS = {"gun": (187, 200), "laser": (210, 280), "lightning": (150, 45), "mortar": (60, 220)}
 
 WEAPON_RANK = {"laser": 3, "lightning": 2, "mortar": 1, "gun": 0}
+# kills win points, so finish fights faster
+UPGRADE_SCORE_ATK = {
+    "gun_damage": 10, "gun_rate": 10, "laser_damage": 9, "laser_charge": 9, "armor": 8,
+    "plating": 7, "nanites": 6, "lightning_efficiency": 6, "lightning_range": 5, "gun_mag": 6,
+    "gun_velocity": 6, "gyros": 5, "servos": 4, "sensors": 4, "reactor": 3, "lightning_chain": 4,
+    "capacitor": 3, "jets": 2, "mortar_reload": 3, "mortar_splash": 3, "mortar_velocity": 2,
+    "laser_pierce": 2,
+}
 UPGRADE_SCORE = {
     # we hide and regen a lot, so faster regen and more hp come first
     "nanites": 10, "plating": 10, "armor": 9, "gun_rate": 7, "gun_damage": 7,
@@ -554,7 +563,8 @@ class Bot:
 
         if obs.get("offer"):
             ch = obs["offer"]["choices"]
-            act["pick"] = max(range(len(ch)), key=lambda i: UPGRADE_SCORE.get(ch[i]["id"], 1))
+            table = UPGRADE_SCORE_ATK if ATTACK_UPGRADES else UPGRADE_SCORE
+            act["pick"] = max(range(len(ch)), key=lambda i: table.get(ch[i]["id"], 1))
 
         charging = any(w and w["kind"] == "laser" and w.get("charge", 0) > 0 for w in weapons)
         cur_rank = WEAPON_RANK.get(w1["kind"], 0) if w1 else -1
