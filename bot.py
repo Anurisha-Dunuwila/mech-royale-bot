@@ -14,8 +14,18 @@ TAU = 2 * math.pi
 G = 2.0  # grid cell size in meters
 KITE = False  # tried it, practice score dropped 3.85 -> 3.38
 # careful fight-or-flight on top of the 3.85 bot, False gives the 3.85 bot back
-TACTICS = True
+TACTICS = False  # scored 3.46
 DANGER_SCALE = 0.75  # we were overrating enemy damage and running too much
+# positioning, each one on its own so we can tell what helps
+COVER_PLUS = True     # if no full cover, take the spot hidden from the most enemies
+SAFE_RETREAT = True   # cover we can reach without walking past enemies
+PREDICT = False       # also hide from where enemies will be in 2 s
+DYN_STRAFE = True     # less predictable strafing
+SURROUND = False      # move toward the gap when enemies are on several sides (like KITE)
+HIGH_GROUND = False   # prefer higher ground when picking a zone spot
+BOTTLENECK = True     # don't park in narrow spots
+ZONE_SPOT = True      # wait in the next zone next to some walls, not in the open
+EARLY_ROTATE = True   # leave for the next zone sooner
 # rough dps and range per weapon
 WDPS = {"gun": (187, 200), "laser": (210, 280), "lightning": (150, 45), "mortar": (60, 220)}
 
@@ -32,6 +42,13 @@ UPGRADE_SCORE = {
 
 def wrap(a):
     return (a + math.pi) % TAU - math.pi
+
+
+def seg_dist(px, py, ax, ay, bx, by):
+    dx, dy = bx - ax, by - ay
+    L = dx * dx + dy * dy
+    f = 0.0 if L < 1e-9 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / L))
+    return math.hypot(ax + dx * f - px, ay + dy * f - py)
 
 
 def norm2(x, y):
@@ -272,6 +289,8 @@ class Bot:
         self.tgt_id = None
         self.panic_until = -99.0
         self.cover_len = None
+        self.strafe_amt = 0.9
+        self.zspot = None
 
     def zone_at(self, z, t):
         s, e = z["shrink_start"], z["shrink_end"]
@@ -332,8 +351,14 @@ class Bot:
         if self.map is None or not threats:
             return None
         x, y, z = me["pos"]
-        eyes = [(m["pos"][0], m["pos"][1], m["pos"][2] + 8) for m in threats]
+        near = sorted(threats, key=lambda m: m["_d"])[:4] if PREDICT else threats
+        eyes = [(m["pos"][0], m["pos"][1], m["pos"][2] + 8) for m in near]
+        if PREDICT:
+            for m in near:
+                v = m.get("vel") or [0, 0, 0]
+                eyes.append((m["pos"][0] + v[0] * 2, m["pos"][1] + v[1] * 2, m["pos"][2] + 8))
         best, bs = None, 1e9
+        part, ps = None, (99, 1e9)
         t0 = time.perf_counter()
         for r in (10, 18, 28, 40, 55, 70):
             for k in range(16):
@@ -348,15 +373,23 @@ class Bot:
                     ex, ey = norm2(e[0] - x, e[1] - y)
                     toward = max(toward, math.cos(a) * ex + math.sin(a) * ey)
                 score = r + 25 * max(0.0, toward)
-                if score >= bs:
+                if SAFE_RETREAT:
+                    # route passes close to someone
+                    for m in near:
+                        if seg_dist(m["pos"][0], m["pos"][1], x, y, px, py) < 25:
+                            score += 40
+                if score >= bs and not COVER_PLUS:
                     continue
                 if not self.map.los((x, y, z + 3), (px, py, gz + 3)):
                     continue
-                if all(not self.map.los(e, (px, py, gz + 7)) for e in eyes):
+                seen = sum(1 for e in eyes if self.map.los(e, (px, py, gz + 7)))
+                if seen == 0 and score < bs:
                     best, bs = (px, py), score
+                elif COVER_PLUS and 0 < seen < len(eyes) and (seen, score) < ps:
+                    part, ps = (px, py), (seen, score)
             if best is not None or time.perf_counter() - t0 > 0.008:
                 break
-        return best
+        return best if best is not None else part
 
     @staticmethod
     def lead(src, tpos, tvel, speed):
@@ -414,6 +447,32 @@ class Bot:
             n += math.hypot(qx - px, qy - py)
             px, py = qx, qy
         return n + math.hypot(gx - px, gy - py) * 1.3
+
+    def zone_spot(self, nc, rmax, x, y):
+        # a walkable spot in the next zone with some walls around it but not boxed in
+        if self.map is None or rmax < 10:
+            return None
+        M = self.map
+        C = 2 * G
+        best, bs = None, 1e9
+        for ring in (0.25, 0.45, 0.65, 0.85):
+            for k in range(12):
+                a = k * TAU / 12 + ring
+                px, py = nc[0] + math.cos(a) * rmax * ring, nc[1] + math.sin(a) * rmax * ring
+                i, j = int((px - M.gx0) / C), int((py - M.gy0) / C)
+                if not (2 < i < M.nx4 - 3 and 2 < j < M.ny4 - 3) or M.blk[j * M.nx4 + i]:
+                    continue
+                walls = sum(M.blk[(j + dj) * M.nx4 + i + di] for dj in range(-2, 3) for di in range(-2, 3))
+                if BOTTLENECK and walls >= 10:
+                    continue
+                sc = math.hypot(px - x, py - y) * 0.5 + ring * rmax * 0.3
+                if 2 <= walls <= 8:
+                    sc -= 30
+                if HIGH_GROUND:
+                    sc -= 2 * (M.ground(px, py) - M.ground(nc[0], nc[1]))
+                if sc < bs:
+                    best, bs = (px, py), sc
+        return best
 
     def act(self, obs):
         me = obs["self"]
@@ -494,12 +553,19 @@ class Bot:
         d_cur = math.hypot(x - cc[0], y - cc[1])
         speed = st.get("walk_speed", 11.7)
         travel = max(0.0, d_next - (nr - margin)) / speed
-        must_go = (d_cur > cr - 12) or (t > zone["shrink_start"] - travel - 20 and d_next > nr - margin)
+        lead_t = travel * 1.3 + 35 if EARLY_ROTATE else travel + 20
+        must_go = (d_cur > cr - 12) or (t > zone["shrink_start"] - lead_t and d_next > nr - margin)
         urgent = (not me["in_zone"]) or d_cur > cr - 4
         ux, uy = ((x - nc[0]) / d_next, (y - nc[1]) / d_next) if d_next > 1 else (0.0, 0.0)
         # sit a bit inside the next circle, not on its edge, so the following circle is never far
         rr = max(0.0, min(d_next, (nr - margin) * 0.65))
         safe = (nc[0] + ux * rr, nc[1] + uy * rr)
+        if ZONE_SPOT:
+            key = (round(nc[0]), round(nc[1]), round(nr))
+            if self.zspot is None or self.zspot[0] != key:
+                self.zspot = (key, self.zone_spot(nc, (nr - margin) * 0.65, x, y))
+            if self.zspot[1] is not None:
+                safe = self.zspot[1]
 
         def in_safe(px, py):
             return (math.hypot(px - nc[0], py - nc[1]) < nr - margin * 0.5
@@ -678,7 +744,11 @@ class Bot:
             tx, ty = -ry, rx
             if t > self.strafe_until:
                 self.strafe = random.choice((-1, 1))
-                self.strafe_until = t + random.uniform(0.5, 1.4)
+                if DYN_STRAFE:
+                    self.strafe_until = t + random.uniform(0.25, 1.2)
+                    self.strafe_amt = random.uniform(0.6, 1.0)
+                else:
+                    self.strafe_until = t + random.uniform(0.5, 1.4)
             if "laser" in kinds:
                 lo, hi = 60, 130
             elif "lightning" in kinds and hpf > 0.5:
@@ -700,8 +770,16 @@ class Bot:
             elif urgent or must_go:
                 mx, my = mx + tx * self.strafe * 0.5, my + ty * self.strafe * 0.5
             else:
-                mx = rx * radial + tx * self.strafe * 0.9
-                my = ry * radial + ty * self.strafe * 0.9
+                mx = rx * radial + tx * self.strafe * self.strafe_amt
+                my = ry * radial + ty * self.strafe * self.strafe_amt
+                if SURROUND:
+                    bs_ = sorted(math.atan2(m["pos"][1] - y, m["pos"][0] - x) for m in threats if m["_los"] and m["_d"] < 120)
+                    if len(bs_) >= 2:
+                        gaps = [((bs_[(i + 1) % len(bs_)] - bs_[i]) % TAU, bs_[i]) for i in range(len(bs_))]
+                        gap, start = max(gaps)
+                        if gap < TAU - 2.1:  # spread over more than ~120 degrees
+                            ea = start + gap / 2
+                            mx, my = mx + math.cos(ea) * 0.7, my + math.sin(ea) * 0.7
                 if not in_safe(x + mx * 15, y + my * 15):
                     sx, sy = norm2(nc[0] - x, nc[1] - y)
                     mx, my = mx * 0.4 + sx, my * 0.4 + sy
