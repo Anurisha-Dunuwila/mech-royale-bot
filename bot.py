@@ -18,7 +18,7 @@ TACTICS = False  # scored 3.46
 DANGER_SCALE = 0.75  # we were overrating enemy damage and running too much
 # positioning, each one on its own so we can tell what helps
 COVER_PLUS = False    # if no full cover, take the spot hidden from the most enemies
-SAFE_RETREAT = False  # cover we can reach without walking past enemies
+SAFE_RETREAT = True   # cover we can reach without walking past enemies
 PREDICT = False       # also hide from where enemies will be in 2 s
 DYN_STRAFE = True     # less predictable strafing
 SURROUND = False      # move toward the gap when enemies are on several sides (like KITE)
