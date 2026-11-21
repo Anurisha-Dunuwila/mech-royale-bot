@@ -15,11 +15,12 @@ G = 2.0  # grid cell size in meters
 
 WEAPON_RANK = {"laser": 3, "lightning": 2, "mortar": 1, "gun": 0}
 UPGRADE_SCORE = {
-    "armor": 10, "plating": 9, "nanites": 8, "gun_damage": 7, "gun_rate": 7,
+    # we hide and regen a lot, so faster regen and more hp come first
+    "nanites": 10, "plating": 10, "armor": 9, "gun_rate": 7, "gun_damage": 7,
     "laser_damage": 6, "laser_charge": 6, "lightning_efficiency": 5, "lightning_range": 5,
-    "gyros": 5, "servos": 5, "sensors": 4, "reactor": 4, "gun_velocity": 4, "gun_mag": 4,
-    "lightning_chain": 4, "capacitor": 3, "jets": 3, "mortar_reload": 3, "mortar_splash": 3,
-    "mortar_velocity": 2, "laser_pierce": 2,
+    "gyros": 5, "servos": 5, "gun_mag": 5, "gun_velocity": 4, "sensors": 4, "reactor": 3,
+    "lightning_chain": 3, "capacitor": 3, "jets": 3, "mortar_reload": 3, "mortar_splash": 3,
+    "mortar_velocity": 2, "laser_pierce": 1,
 }
 
 
